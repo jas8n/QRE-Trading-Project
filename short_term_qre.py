@@ -1,25 +1,18 @@
 """
-QRE-ST — short-term mean-reversion model (1-2 week holding horizon).
+QRE-ST: the short-term sister model (1-2 week holds).
 
-The sister model to QRE for mandates that require weekly-scale turnover.
-Where QRE harvests multi-week trends (low win rate, fat right tail), QRE-ST
-harvests the short-term reversal effect in liquid equities: quality names
-get oversold on 3-10 day timescales and snap back. Opposite anatomy:
-high win rate, small frequent wins, hard risk caps on the left tail.
+Forcing the trend model into weekly holds destroyed most of its profit, so
+this is a separate model built for that horizon instead: buy sharp dips in
+stocks that are above their 200d SMA, sell the bounce. High win rate, small
+wins, no fat right tail - basically the opposite anatomy of QRE.
 
-Structure:
-  SETUP   long-term uptrend intact (close > 200d SMA) — only fade dips in
-          names that have somewhere to snap back to
-  ENTRY   washout: fast RSI(2) collapsed AND multi-day z-score stretched
-          below its short mean; no entries on >2 ATR gap days
-  EXIT    snap-back complete (RSI(2) recovers / z touches mean),
-          or time stop (max_hold bars) — this bounds holds to ~1-2 weeks
-  RISK    catastrophe stop (k*ATR), gap-shock exit, vol-targeted sizing,
-          notional cap
+Entry: RSI(2) washout plus a stretched 10-day z-score, skip big gap days.
+Exit: bounce past the mean (z > +0.5) or a 10-bar time stop. A 4-ATR
+catastrophe stop and a gap exit cap the downside.
 
 Usage:
-    python short_term_qre.py                       # 20-name basket validation
-    python short_term_qre.py "AAPL,MSFT,..."       # custom basket
+    python short_term_qre.py                 # default 20-stock basket
+    python short_term_qre.py "AAPL,MSFT"     # custom basket
 """
 
 from __future__ import annotations
@@ -39,13 +32,13 @@ class STParams:
     trend_len: int = 200        # uptrend filter (SMA)
     rsi_len: int = 2
     rsi_entry: float = 10.0
-    rsi_exit: float = 101.0     # RSI exit disabled — ablation showed it sells
-                                # the bounce too early; z-exit dominates
+    rsi_exit: float = 101.0     # disabled: the RSI exit kept selling the bounce
+                                # too early, the z exit worked better
     z_len: int = 10
     z_entry: float = -1.5
-    z_exit: float = 0.5         # exit past the mean (slight overshoot) —
-                                # best IS AND OOS (19/20 names profitable)
-    max_hold: int = 10          # hard time stop → bounds holds to 2 weeks
+    z_exit: float = 0.5         # exit slightly past the mean, tested best both
+                                # in-sample and out-of-sample
+    max_hold: int = 10          # hard time stop, keeps holds under 2 weeks
     cat_stop_atr: float = 4.0   # catastrophe stop (0 = none)
     gap_atr_mult: float = 2.0   # adverse-gap exit / gap-day entry block
     atr_len: int = 14

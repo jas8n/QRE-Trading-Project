@@ -1,22 +1,20 @@
 """
-Backtester for the Quant Regime Ensemble (QRE) strategy.
+Backtester for the QRE strategy.
 
-Mirrors the Pine Script logic bar-for-bar so that TradingView results can be
-cross-validated, and adds what Pine can't do well:
+Mirrors the Pine Script version bar-for-bar so TradingView results can be
+cross-checked, plus the things Pine can't do well: train/test splits,
+walk-forward sweeps, bootstrap stats, portfolio runs.
 
-  * train/test (in-sample / out-of-sample) split
-  * walk-forward parameter sweep
-  * proper performance statistics (Sharpe, Sortino, max DD, profit factor)
+Everything is causal - a signal on bar t only uses data up to bar t, and
+fills happen on the close of the signal bar (same as Pine with
+process_orders_on_close=true). Costs: 0.05% commission + 2bp slippage per side.
 
 Usage:
     pip install pandas numpy yfinance
-    python backtest_qre.py SPY               # single symbol, default params
-    python backtest_qre.py SPY --sweep       # coarse walk-forward sweep
-    python backtest_qre.py --synthetic       # smoke test, no network needed
-
-All computations are causal (no look-ahead): every signal at bar t uses data
-up to and including bar t, and fills happen at bar t's close (matching Pine's
-process_orders_on_close=true) with slippage applied.
+    python backtest_qre.py SPY
+    python backtest_qre.py QQQ --sweep
+    python backtest_qre.py "AAPL,MU" --stocks --basket
+    python backtest_qre.py --synthetic     # smoke test, no internet needed
 """
 
 from __future__ import annotations
@@ -29,7 +27,7 @@ import numpy as np
 import pandas as pd
 
 
-# ────────────────────────────── parameters ──────────────────────────────────
+# ---- parameters ----
 @dataclass(frozen=True)
 class Params:
     # regime classifier
@@ -63,7 +61,7 @@ class Params:
     # costs
     commission_pct: float = 0.05   # per side, %
     slippage_bp: float = 2.0       # per side, basis points
-    # ── single-stock defenses (all off by default = index mode) ──
+    # single-stock defenses, all off by default (= index mode)
     use_mkt_filter: bool = False   # longs only when benchmark > its 200d SMA
     mkt_ma_len: int = 200
     use_rs_filter: bool = False    # longs only when stock outperforms benchmark
@@ -71,7 +69,7 @@ class Params:
     gap_atr_mult: float = 0.0      # >0: exit on adverse open gap > k*ATR, skip entries on gap days
     max_notional_pct: float = 100.0  # cap position notional as % of equity
     adaptive_er: bool = False      # ER trend gate = own 70th pctile instead of fixed
-    # ── precision refinements (each ablated before default-on) ──
+    # refinement experiments (mostly rejected, kept for reproducibility)
     use_htf_filter: bool = False   # trend entries only with rising 100d EMA
     htf_len: int = 100
     use_vol_confirm: bool = False  # breakout volume > vol_confirm_x * 20d avg
@@ -79,41 +77,36 @@ class Params:
     mr_loose: bool = False         # drop ADX condition from the ranging gate
     stag_bars: int = 0             # >0: exit trend trade if < stag_atr profit after N bars
     stag_atr: float = 0.5
-    use_breakeven: bool = False    # stop → entry after 1.5*ATR unrealized profit
+    use_breakeven: bool = False    # move stop to entry after 1.5*ATR of profit
     breakeven_atr: float = 1.5
     tp_atr: float = 0.0            # >0: fixed profit target at k*ATR (win-rate
-                                   # experiment; caps trend winners — see README)
-    # ── opportunity capture (structural; ablated before default-on) ──
+                                   # experiment, caps the winners - see RESEARCH.md)
+    # structural experiments (also rejected, see RESEARCH.md)
     pyramid_max: int = 1           # max units per position (1 = no pyramiding)
     pyramid_step_atr: float = 1.0  # add a unit every k*ATR of favorable move
     use_pullback: bool = False     # third engine: buy z-dips within uptrends
     pullback_z: float = -1.0
     pullback_rsi: float = 30.0
-    max_hold: int = 0              # >0: force-close any trade after N bars
-                                   # (holding-period experiment — see README)
+    max_hold: int = 0              # >0: force-close after N bars (holding-period
+                                   # experiment - see RESEARCH.md)
 
 
 def stock_params(**overrides) -> Params:
-    """Preset geared for individual stocks (large + mid cap).
+    """Preset for individual stocks (tested on 10 large caps + 10 mid caps).
 
-    Component ablation across 20 names (10 large, 10 mid cap, 2012-2026):
-      KEPT   rs_filter      — longs only in names outperforming SPY (17/20 prof.)
-      KEPT   gap_atr_mult=2 — exit on adverse >2-ATR overnight gaps; best
-                              worst-case DD (-8.9% vs -10.5%), esp. mid caps
-      KEPT   notional cap   — ATR sizing over-allocates to quiet names
-      DROPPED mkt_filter    — SPY 200d gate missed recoveries, cost Sharpe
-      DROPPED adaptive_er   — raised the trend gate too high, worst DD -14%
+    Kept after ablation: the RS filter, the 2-ATR gap exit, the notional cap.
+    Dropped: the SPY 200d market filter (missed recoveries) and the adaptive
+    ER threshold (blew up worst-case drawdown). See RESEARCH.md for numbers.
     """
     base = dict(use_rs_filter=True, gap_atr_mult=2.0,
                 max_notional_pct=20.0, allow_shorts=False,
-                vol_cap_pct=97.0)   # 90th pctile ejects high-beta names mid-rally
-                                    # (MU/LUNR); 97 keeps only true tail protection.
-                                    # Basket-neutral (0.92→0.94), index-neutral.
+                vol_cap_pct=97.0)   # 90 kept kicking out volatile names (MU etc)
+                                    # mid-rally; 97 only trips on real tail events
     base.update(overrides)
     return Params(**base)
 
 
-# ───────────────────────────── indicators ───────────────────────────────────
+# ---- indicators ----
 def wilder_ema(s: pd.Series, n: int) -> pd.Series:
     return s.ewm(alpha=1.0 / n, adjust=False).mean()
 
@@ -164,7 +157,7 @@ def kama(c: pd.Series, n: int, fast: int, slow: int) -> pd.Series:
 
 
 def rolling_slope_tstat(c: pd.Series, n: int) -> tuple[pd.Series, pd.Series]:
-    """OLS slope and its t-statistic over a rolling window (fully vectorized)."""
+    """Rolling OLS slope and its t-stat, vectorized with sliding windows."""
     x = np.arange(n, dtype=float)
     x_dm = x - x.mean()
     sxx = float((x_dm ** 2).sum())
@@ -186,11 +179,11 @@ def rolling_slope_tstat(c: pd.Series, n: int) -> tuple[pd.Series, pd.Series]:
 
 
 def pct_rank(s: pd.Series, n: int) -> pd.Series:
-    """Percentile rank of the current value within the trailing n window (Pine's ta.percentrank)."""
+    """Same as Pine's ta.percentrank: where the current value sits in the trailing window."""
     return s.rolling(n).apply(lambda w: (w[:-1] <= w[-1]).mean() * 100, raw=True)
 
 
-# ───────────────────────────── backtest core ────────────────────────────────
+# ---- backtest core ----
 @dataclass
 class Trade:
     entry_i: int
@@ -306,8 +299,8 @@ def run_backtest(df: pd.DataFrame, p: Params, capital: float = 100_000.0,
         row = f.iloc[i]
         if pos != 0:
             bars_in += 1
-            # 0) gap-shock exit: adverse overnight gap > k*ATR → out at the open
-            #    (models earnings surprises; fill at the open, not the stop level)
+            # gap-shock exit: bad overnight gap -> get out at the open.
+            # this is the earnings-surprise case, so no pretty fills
             if p.gap_atr_mult > 0 and not np.isnan(GAP[i]):
                 if (pos > 0 and GAP[i] < -p.gap_atr_mult) or \
                    (pos < 0 and GAP[i] > p.gap_atr_mult):
@@ -325,13 +318,13 @@ def run_backtest(df: pd.DataFrame, p: Params, capital: float = 100_000.0,
             if (pos > 0 and H[i] >= tgt) or (pos < 0 and L[i] <= tgt):
                 close_pos(i, tgt, "target")
         if pos != 0 and engine in ("TREND", "PULL"):
-            # breakeven: once the trade has paid, refuse to let it turn into a loss
+            # breakeven stop once the trade has moved enough in our favor
             if p.use_breakeven:
                 if pos > 0 and C[i] - entry_px >= p.breakeven_atr * A[i]:
                     stop = max(stop, entry_px)
                 elif pos < 0 and entry_px - C[i] >= p.breakeven_atr * A[i]:
                     stop = min(stop, entry_px)
-            # stagnation: trade went nowhere → free the capital
+            # stagnation exit: trade went nowhere, free up the capital
             if p.stag_bars > 0 and bars_in >= p.stag_bars and \
                     np.sign(pos) * (C[i] - entry_px) < p.stag_atr * A[i]:
                 close_pos(i, C[i], "stagnation")
@@ -366,8 +359,8 @@ def run_backtest(df: pd.DataFrame, p: Params, capital: float = 100_000.0,
         if pos != 0 and row["vol_blowout"]:
             close_pos(i, C[i], "vol-breaker")
 
-        # pyramiding: add a unit each pyramid_step_atr of favorable move,
-        # ratcheting the stop up with every add (turtle-style)
+        # pyramiding (turtle style): add a unit per step of favorable move,
+        # raising the stop with each add
         if pos != 0 and engine in ("TREND", "PULL") and units < p.pyramid_max:
             side_ = int(np.sign(pos))
             if side_ * (C[i] - last_add_px) >= p.pyramid_step_atr * A[i]:
@@ -443,7 +436,7 @@ def run_backtest(df: pd.DataFrame, p: Params, capital: float = 100_000.0,
     return pd.Series(equity, index=f.index), trades
 
 
-# ─────────────────────────────── metrics ────────────────────────────────────
+# ---- metrics ----
 def metrics(equity: pd.Series, trades: list[Trade], periods_per_year: int = 252) -> dict:
     r = equity.pct_change().dropna()
     ann = np.sqrt(periods_per_year)
@@ -483,7 +476,7 @@ def print_report(name: str, equity: pd.Series, trades: list[Trade]):
         print(f"    {eng:<6} {len(pnls):4d} trades, net {sum(pnls):+,.0f}")
 
 
-# ──────────────────────────── data loading ──────────────────────────────────
+# ---- data loading ----
 def load_yf(symbol: str, start: str = "2010-01-01") -> pd.DataFrame:
     import yfinance as yf
     df = yf.download(symbol, start=start, auto_adjust=True, progress=False)
@@ -493,7 +486,7 @@ def load_yf(symbol: str, start: str = "2010-01-01") -> pd.DataFrame:
 
 
 def synthetic_ohlc(n: int = 3000, seed: int = 7) -> pd.DataFrame:
-    """Regime-switching GBM: alternating trend and chop blocks, for smoke tests."""
+    """Fake price data (alternating trend and chop blocks) for offline smoke tests."""
     rng = np.random.default_rng(seed)
     px, prices = 100.0, []
     i = 0
@@ -517,12 +510,11 @@ def synthetic_ohlc(n: int = 3000, seed: int = 7) -> pd.DataFrame:
                          "Close": c.values, "Volume": 1e6}, index=idx)
 
 
-# ───────────────────────── robustness toolkit ───────────────────────────────
+# ---- robustness toolkit ----
 def portfolio_backtest(datas: dict[str, pd.DataFrame], p: Params,
                        bench: pd.Series | None = None,
                        capital: float = 100_000.0) -> pd.Series:
-    """Equal-weight portfolio: each name runs on capital/N. Since sizing is
-    fixed-fractional per name, the summed equity curve is the portfolio."""
+    """Equal-weight portfolio: run each name on capital/N and sum the curves."""
     slice_cap = capital / len(datas)
     curves = []
     for s, df in datas.items():
@@ -535,8 +527,8 @@ def portfolio_backtest(datas: dict[str, pd.DataFrame], p: Params,
 
 def bootstrap_sharpe_ci(equity: pd.Series, n_boot: int = 2000,
                         block: int = 20, seed: int = 0) -> tuple[float, float, float]:
-    """Block-bootstrap 90% CI for the annualized Sharpe (preserves short-range
-    autocorrelation). Returns (5th pct, point estimate, 95th pct)."""
+    """Block-bootstrap 90% CI for the annualized Sharpe. Blocks keep the
+    short-range autocorrelation that plain resampling would destroy."""
     r = equity.pct_change().dropna().to_numpy()
     n = len(r)
     rng = np.random.default_rng(seed)
@@ -554,7 +546,7 @@ def bootstrap_sharpe_ci(equity: pd.Series, n_boot: int = 2000,
 
 def cost_stress(datas: dict[str, pd.DataFrame], p: Params,
                 bench: pd.Series | None = None):
-    """Does the edge survive when frictions double / quadruple?"""
+    """Re-run the portfolio with 2x and 4x costs to see if the edge survives."""
     print("\nCost stress (portfolio Sharpe):")
     for mult in (1.0, 2.0, 4.0):
         pm = replace(p, commission_pct=p.commission_pct * mult,
@@ -567,8 +559,8 @@ def cost_stress(datas: dict[str, pd.DataFrame], p: Params,
 
 def plateau_check(datas: dict[str, pd.DataFrame], p: Params,
                   bench: pd.Series | None = None):
-    """Perturb each key parameter ±~25%; a robust model degrades gracefully.
-    Reports portfolio Sharpe at each perturbation."""
+    """Nudge each key parameter about 25% either way. If Sharpe falls off a
+    cliff at the chosen values, that would be an overfitting red flag."""
     perturbs = {
         "er_trend_th":   [0.20, 0.25, 0.30],
         "atr_stop_mult": [2.0, 2.5, 3.0],
@@ -585,24 +577,17 @@ def plateau_check(datas: dict[str, pd.DataFrame], p: Params,
         print(f"  {key:<14} " + "   ".join(row))
 
 
-# ───────────────────────── tradeability screen ──────────────────────────────
+# ---- tradeability screen ----
 def tradeability_screen(df: pd.DataFrame, p: Params,
                         bench: pd.Series | None = None) -> dict:
-    """Structural screen: can the model's assumptions operate on this name?
+    """Checks whether the model's assumptions can even operate on a stock.
 
-    Deliberately does NOT use backtest performance (selection bias) and does
-    NOT screen on volatility level — a 36-name calibration sweep showed ATR%
-    does not predict model success (the 5-7% ATR bucket was the BEST:
-    median Sharpe 0.61, 4/4 profitable; vol-normalization works as designed).
-    What structure CAN tell you:
-
-      INSUFFICIENT — too little history or too few signals for any verdict.
-                     A 4-year single-name Sharpe has stderr ~±0.5; don't
-                     pretend to know.
-      CAUTION      — liquidity / price / gap regime undermines the fill and
-                     slippage assumptions (edge may be real but uncapturable).
-      PASS         — assumptions hold; expect single-name results to be noisy
-                     anyway and diversify across names.
+    On purpose this uses no performance data (that would be selection bias)
+    and doesn't screen on volatility either - I tested that and vol level
+    didn't predict anything (see RESEARCH.md). Verdicts:
+      INSUFFICIENT - not enough history or too few signals to judge
+      CAUTION      - liquidity/price/gap behavior breaks the fill assumptions
+      PASS         - fine to include, though single-stock results stay noisy
     """
     f = compute_features(df, p, bench=bench)
     warm = max(p.vol_lookback, p.reg_len, p.don_len + 1, p.z_len, p.kama_len) + 1
@@ -638,12 +623,11 @@ def tradeability_screen(df: pd.DataFrame, p: Params,
     return {"verdict": verdict, "reasons": reasons, **checks}
 
 
-# ───────────────────────────── signal scanner ───────────────────────────────
+# ---- signal scanner ----
 def scan_signals(symbols: list[str], p: Params, bench: pd.Series | None = None,
                  capital: float = 100_000.0, start: str = "2018-01-01"):
-    """Watchlist screener: evaluate the entry conditions on the LATEST bar of
-    each name and print anything actionable. Mirrors the entry logic in
-    run_backtest exactly (same gates, same sizing)."""
+    """Check the latest bar of each symbol for a live entry signal.
+    Same gates and sizing as run_backtest."""
     print(f"{'sym':>6} {'date':>11} {'regime':>10} {'signal':>11} {'close':>9} "
           f"{'stop':>9} {'qty':>6}  notes")
     for s in symbols:
@@ -687,9 +671,10 @@ def scan_signals(symbols: list[str], p: Params, bench: pd.Series | None = None,
             print(f"{s:>6}  ERROR: {e}")
 
 
-# ─────────────────────────── walk-forward sweep ─────────────────────────────
+# ---- walk-forward sweep ----
 def walk_forward(df: pd.DataFrame, base: Params, train_frac: float = 0.6):
-    """Coarse sweep on the train segment, report champion on held-out test."""
+    """Small grid search on the train segment, then report the winner on the
+    held-out test segment."""
     split = int(len(df) * train_frac)
     train, test = df.iloc[:split], df.iloc[split - 300:]   # 300-bar warmup overlap
     grid = [replace(base, er_trend_th=e, atr_stop_mult=s, z_entry=z)
@@ -711,7 +696,7 @@ def walk_forward(df: pd.DataFrame, base: Params, train_frac: float = 0.6):
     return best_p
 
 
-# ─────────────────────────────── entrypoint ─────────────────────────────────
+# ---- entrypoint ----
 def main():
     ap = argparse.ArgumentParser(description="QRE strategy backtester")
     ap.add_argument("symbol", nargs="?", default="SPY")

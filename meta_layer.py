@@ -1,21 +1,23 @@
 """
-ML meta-labeling layer for the QRE strategy (López de Prado-style).
+ML meta-labeling experiment. Spoiler: it didn't work, and I kept it anyway.
 
-The base model decides WHEN to trade; a gradient-boosted classifier learns
-WHICH of those signals tend to pay, from the statistical context at entry
-(regime stats, vol percentile, relative strength, gap state, ...). Signals
-the model distrusts are skipped or downsized. The base edge is never
-modified — the ML only re-weights validated signals, which keeps the
-overfitting surface small and auditable.
+The idea (from Lopez de Prado): the base strategy decides when to trade, and
+a gradient-boosted model learns which of those signals to actually take,
+using the stats at entry (regime numbers, vol percentile, relative strength,
+gap state...). Weak signals get skipped or downsized.
 
-Walk-forward protocol (no temporal leakage):
-  for each test year Y:  train on all trades that EXITED before Jan 1 of Y,
-  predict trades ENTERED during Y. A trade still open at year-end can never
-  appear in its own training set.
+Walk-forward, no leakage: for each test year the model trains only on trades
+that exited before Jan 1 of that year.
+
+Result: the win/loss classifier actively hurt (its least confident signals
+had the highest PnL per trade - big trend winners look ugly at entry), and a
+regressor on trade returns had ~zero rank correlation with reality. My take:
+the entry gates already use up the information in those features. Details in
+RESEARCH.md.
 
 Usage:
-    python meta_layer.py                 # default 20-name basket
-    python meta_layer.py AAPL,MU,...     # custom basket
+    python meta_layer.py
+    python meta_layer.py AAPL,MU,...
 """
 
 from __future__ import annotations
@@ -52,7 +54,7 @@ def collect_trades(symbols: list[str], p: Params, bench: pd.Series) -> pd.DataFr
 def walk_forward_meta(trades: pd.DataFrame, first_test_year: int = 2017,
                       min_train: int = 100, skip_below: float = 0.42,
                       seed: int = 0):
-    """Returns trades with p_win and meta weights attached (test years only)."""
+    """Attach p_win and meta weights to the test-year trades."""
     out = []
     years = range(first_test_year, trades["entry_date"].max().year + 1)
     for y in years:
