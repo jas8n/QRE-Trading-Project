@@ -19,7 +19,7 @@
 // Keep the inputs identical to your strategy settings or the screener and the
 // chart will disagree. Defaults here = validated stock preset.
 // ─────────────────────────────────────────────────────────────────────────────
-indicator("QRE Screener", shorttitle = "QRE-SCR", overlay = false)
+indicator("QRE Screener", shorttitle = "QRE-SCR", overlay = false, max_bars_back = 500)
 
 // ── inputs (mirror the strategy's stock-preset defaults) ──
 erLen      = input.int(20,    "Efficiency Ratio length")
@@ -97,7 +97,9 @@ rsiF     = ta.rsi(close, rsiLen)
 benchClose = request.security(rsSymbol, timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off)
 rsRatio    = not na(benchClose) and benchClose > 0 ? close / benchClose : 1.0
 rsSma      = ta.sma(rsRatio, rsLen)
-rsActive   = useRsFilter and syminfo.ticker != syminfo.ticker(rsSymbol)
+// syminfo.ticker is a variable, not a function - compare the input string
+// against both the plain ticker and the exchange-prefixed form
+rsActive   = useRsFilter and rsSymbol != syminfo.ticker and rsSymbol != syminfo.tickerid
 rsOk       = not rsActive or rsRatio > rsSma
 
 gapAtr     = atr[1] > 0 ? (open - close[1]) / atr[1] : 0.0

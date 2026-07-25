@@ -35,7 +35,8 @@ strategy("Quant Regime Ensemble [QRE]",
      slippage     = 2,
      calc_on_every_tick = false,
      process_orders_on_close = true,
-     max_labels_count = 500)
+     max_labels_count = 500,
+     max_bars_back = 500)
 
 // ════════════════════════════════ INPUTS ════════════════════════════════════
 grpRegime = "Regime Classifier"
@@ -138,7 +139,9 @@ regime     = volBlowout ? 0 : isTrending ? 1 : isRanging ? -1 : 0   // 1=trend, 
 benchClose = request.security(rsSymbol, timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off)
 rsRatio    = not na(benchClose) and benchClose > 0 ? close / benchClose : 1.0
 rsSma      = ta.sma(rsRatio, rsLen)
-rsActive   = useRsFilter and syminfo.ticker != syminfo.ticker(rsSymbol)
+// syminfo.ticker is a variable, not a function - compare the input string
+// against both the plain ticker and the exchange-prefixed form
+rsActive   = useRsFilter and rsSymbol != syminfo.ticker and rsSymbol != syminfo.tickerid
 rsOk       = not rsActive or rsRatio > rsSma
 
 // Overnight gap in ATR units (earnings-shock detector)
@@ -154,8 +157,12 @@ sc       = math.pow(erK * (fastSC - slowSC) + slowSC, 2)
 var float kama = na
 kama    := na(kama[1]) ? close : kama[1] + sc * (close - kama[1])
 
-donHi    = ta.highest(high, donLen)[1]
-donLo    = ta.lowest(low,  donLen)[1]
+// full-series versions stay at global scope: ta.* has to run on every bar or
+// its history goes wrong when it sits inside an if block
+donHiFull = ta.highest(high, donLen)
+donLoFull = ta.lowest(low,  donLen)
+donHi    = donHiFull[1]
+donLo    = donLoFull[1]
 
 trendLong  = isTrending and close > kama and slope > 0 and close > donHi
 trendShort = isTrending and close < kama and slope < 0 and close < donLo
@@ -182,6 +189,7 @@ qty        = math.min(qtyRisk, qtyCap)
 var string tradeEngine = na     // "TREND" | "MR"
 var int    barsInTrade = 0
 var float  trailStop   = na
+var float  stopLevel   = na     // the protective stop currently working
 
 inLong  = strategy.position_size > 0
 inShort = strategy.position_size < 0
@@ -191,13 +199,14 @@ barsInTrade := flat ? 0 : barsInTrade + 1
 
 // chandelier trail for trend trades
 if inLong and tradeEngine == "TREND"
-    newTrail = ta.highest(high, donLen) - chandMult * atr
+    newTrail = donHiFull - chandMult * atr
     trailStop := na(trailStop) ? newTrail : math.max(trailStop, newTrail)
 if inShort and tradeEngine == "TREND"
-    newTrail = ta.lowest(low, donLen) + chandMult * atr
+    newTrail = donLoFull + chandMult * atr
     trailStop := na(trailStop) ? newTrail : math.min(trailStop, newTrail)
 if flat
     trailStop := na
+    stopLevel := na
 
 // ═══════════════════════════════ ORDERS ═════════════════════════════════════
 longSignal  = ((allowTrend and trendLong)  or (allowMR and mrLong)) and rsOk
@@ -208,32 +217,38 @@ shortSignal = ((allowTrend and trendShort) or (allowMR and mrShort)) and allowSh
 if flat and qty > 0 and not volBlowout and not gapDay
     if longSignal
         tradeEngine := allowTrend and trendLong ? "TREND" : "MR"
+        stopLevel := close - stopDist
         strategy.entry("L", strategy.long, qty = qty,
              alert_message = '{"action":"buy","ticker":"' + syminfo.ticker + '","engine":"' + tradeEngine + '","qty":' + str.tostring(qty) + ',"stop":' + str.tostring(close - stopDist, "#.####") + '}')
-        strategy.exit("L-stop", from_entry = "L", stop = close - stopDist,
+        strategy.exit("L-exit", from_entry = "L", stop = stopLevel,
              alert_message = '{"action":"exit","ticker":"' + syminfo.ticker + '","reason":"stop"}')
     else if shortSignal
         tradeEngine := allowTrend and trendShort ? "TREND" : "MR"
+        stopLevel := close + stopDist
         strategy.entry("S", strategy.short, qty = qty,
              alert_message = '{"action":"sell","ticker":"' + syminfo.ticker + '","engine":"' + tradeEngine + '","qty":' + str.tostring(qty) + ',"stop":' + str.tostring(close + stopDist, "#.####") + '}')
-        strategy.exit("S-stop", from_entry = "S", stop = close + stopDist,
+        strategy.exit("S-exit", from_entry = "S", stop = stopLevel,
              alert_message = '{"action":"exit","ticker":"' + syminfo.ticker + '","reason":"stop"}')
 
-// trend exits: chandelier trail or KAMA/regime loss
-if inLong and tradeEngine == "TREND"
-    if not na(trailStop)
-        strategy.exit("L-trail", from_entry = "L", stop = trailStop,
-             alert_message = '{"action":"exit","ticker":"' + syminfo.ticker + '","reason":"trail"}')
-    if close < kama and er < erTrendTh * 0.6
-        strategy.close("L", comment = "regime-loss",
-             alert_message = '{"action":"exit","ticker":"' + syminfo.ticker + '","reason":"regime"}')
-if inShort and tradeEngine == "TREND"
-    if not na(trailStop)
-        strategy.exit("S-trail", from_entry = "S", stop = trailStop,
-             alert_message = '{"action":"exit","ticker":"' + syminfo.ticker + '","reason":"trail"}')
-    if close > kama and er < erTrendTh * 0.6
-        strategy.close("S", comment = "regime-loss",
-             alert_message = '{"action":"exit","ticker":"' + syminfo.ticker + '","reason":"regime"}')
+// One protective stop per position, re-sent every bar under the same ID so it
+// updates instead of stacking a second order. Trend trades ratchet it up with
+// the chandelier trail; MR trades just keep the original ATR stop.
+if inLong
+    effStop = na(trailStop) ? stopLevel : math.max(nz(stopLevel, trailStop), trailStop)
+    strategy.exit("L-exit", from_entry = "L", stop = effStop,
+         alert_message = '{"action":"exit","ticker":"' + syminfo.ticker + '","reason":"stop-or-trail"}')
+if inShort
+    effStop = na(trailStop) ? stopLevel : math.min(nz(stopLevel, trailStop), trailStop)
+    strategy.exit("S-exit", from_entry = "S", stop = effStop,
+         alert_message = '{"action":"exit","ticker":"' + syminfo.ticker + '","reason":"stop-or-trail"}')
+
+// trend trades also bail out if price loses the KAMA while the trend decays
+if inLong and tradeEngine == "TREND" and close < kama and er < erTrendTh * 0.6
+    strategy.close("L", comment = "regime-loss",
+         alert_message = '{"action":"exit","ticker":"' + syminfo.ticker + '","reason":"regime"}')
+if inShort and tradeEngine == "TREND" and close > kama and er < erTrendTh * 0.6
+    strategy.close("S", comment = "regime-loss",
+         alert_message = '{"action":"exit","ticker":"' + syminfo.ticker + '","reason":"regime"}')
 
 // mean-reversion exits: z back to mean, RSI normalization, or time stop
 if inLong and tradeEngine == "MR"
