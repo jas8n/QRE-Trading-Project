@@ -3,3 +3,4 @@ qre_universe.txt
 __pycache__/
 *.pyc
 .DS_Store
+.Rhistory
