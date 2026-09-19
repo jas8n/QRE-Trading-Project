@@ -1,5 +1,9 @@
 # QRE - systematic trading research
 
+**[RESEARCH.md](RESEARCH.md) is the main document** — full methodology, all six
+rejected experiments, statistical validation, and honest limitations. This README
+is the summary.
+
 This started as "build a trading strategy for TradingView" and turned into a
 longer project about proving whether a strategy actually works. I ended up
 with two models, a backtesting pipeline, and a growing list of ideas that
@@ -22,6 +26,11 @@ included:
 | Typical hold | ~5 weeks | ~1 week |
 | Portfolio Sharpe (20 stocks) | 0.93 | 0.91 |
 | Win rate | ~55% | 68% |
+
+The 20-stock basket (10 large cap, 10 mid cap) is the fixed test universe used
+throughout, picked by structural rules rather than past performance. The 50+
+figure is the wider set of names used for cross-sectional checks. Tickers are
+listed in [RESEARCH.md](RESEARCH.md).
 
 Out-of-sample results came out better than in-sample for both models, the
 edge survives even at 4x assumed costs, and bootstrap confidence intervals

@@ -23,6 +23,28 @@ results are documented with the same care as the positive ones.
 | Cost stress (4× frictions) | Sharpe 0.93 → 0.63 | 0.91 → 0.37 |
 | Profit concentration | Top 5% of trades = 83% of P&L | diffuse |
 
+### The evaluation basket
+
+Every number above comes from the same fixed 20-name basket, held constant so
+that ablations are comparable. It is assembled by the structural tradeability
+screen — liquidity, history, gap behaviour — and never by past performance:
+
+- **Large cap (10):** AAPL, MSFT, NVDA, JPM, XOM, KO, TSLA, UNH, HD, CAT
+- **Mid cap (10):** WSM, DKS, TOL, CROX, ANF, TXRH, EME, GGG, WMS, SAIA
+
+The basket size was chosen as a test-design constant, not tuned — portfolio size
+itself was never swept, so 20 is not claimed to be optimal. Curating *down* from
+it made things worse (see [Universe rule](#key-positive-findings)). The wider
+50+ name figure quoted in the README covers the cross-sectional studies: the
+36-name volatility sweep and the 18-name high-volatility cohort.
+
+Reproduce the portfolio row with:
+
+```bash
+python backtest_qre.py "AAPL,MSFT,NVDA,JPM,XOM,KO,TSLA,UNH,HD,CAT,\
+WSM,DKS,TOL,CROX,ANF,TXRH,EME,GGG,WMS,SAIA" --stocks --basket
+```
+
 Six plausible "improvements" were built, tested, and **rejected** — including
 an ML meta-labeling layer, pyramiding, and universe curation by past
 performance. Details below; the rejections are the most instructive part.
@@ -43,8 +65,8 @@ performance. Details below; the rejections are the most instructive part.
 Every change followed the same gauntlet before shipping:
 
 1. **Component ablation** — each candidate feature tested individually against
-   the baseline across a 20-name basket (10 large cap, 10 mid cap), never as
-   a bundle.
+   the baseline across the fixed [20-name basket](#the-evaluation-basket), never
+   as a bundle.
 2. **Temporal validation** — parameters chosen on 2012–2020, evaluated
    untouched on 2020–2026 (contains the COVID crash and the 2022 bear).
    OOS-beats-IS was required, not just OOS-positive.
