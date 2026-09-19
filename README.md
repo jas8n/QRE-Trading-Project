@@ -75,7 +75,8 @@ window slowly contaminates it), is in [RESEARCH.md](RESEARCH.md).
 ```bash
 pip install pandas numpy yfinance scikit-learn
 python backtest_qre.py SPY                               # backtest one symbol
-python backtest_qre.py "AAPL,MU,TSLA" --stocks --basket  # portfolio + robustness checks
+python backtest_qre.py --stocks --basket                 # the 20-name basket + robustness
+python backtest_qre.py "AAPL,MU,TSLA" --stocks --basket  # or your own list
 python backtest_qre.py "AAPL,MU,TSLA" --stocks --signals # scan for today's signals
 ```
 
