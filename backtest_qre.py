@@ -14,6 +14,7 @@ Usage:
     python backtest_qre.py SPY
     python backtest_qre.py QQQ --sweep
     python backtest_qre.py "AAPL,MU" --stocks --basket
+    python backtest_qre.py --stocks --basket   # the 20-name evaluation basket
     python backtest_qre.py --synthetic     # smoke test, no internet needed
 """
 
@@ -25,6 +26,24 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 import pandas as pd
+
+
+# ---- evaluation basket ----
+# The fixed 20-name universe every headline result is measured on (see
+# RESEARCH.md). 10 large cap + 10 mid cap, assembled from the structural
+# tradeability screen - liquidity, history, gap behaviour - and never from past
+# performance. Held constant so component ablations stay comparable; the basket
+# SIZE was a test-design constant, not swept, so 20 is not claimed to be optimal.
+LARGE_CAP = ("AAPL", "MSFT", "NVDA", "JPM", "XOM", "KO", "TSLA", "UNH", "HD", "CAT")
+MID_CAP = ("WSM", "DKS", "TOL", "CROX", "ANF", "TXRH", "EME", "GGG", "WMS", "SAIA")
+DEFAULT_BASKET = LARGE_CAP + MID_CAP
+
+
+def parse_symbols(arg: str | None) -> list[str]:
+    """Comma-separated symbols, or the default evaluation basket if omitted."""
+    if not arg:
+        return list(DEFAULT_BASKET)
+    return [s.strip().upper() for s in arg.split(",") if s.strip()]
 
 
 # ---- parameters ----
@@ -699,7 +718,9 @@ def walk_forward(df: pd.DataFrame, base: Params, train_frac: float = 0.6):
 # ---- entrypoint ----
 def main():
     ap = argparse.ArgumentParser(description="QRE strategy backtester")
-    ap.add_argument("symbol", nargs="?", default="SPY")
+    ap.add_argument("symbol", nargs="?", default=None,
+                    help="ticker, or comma-separated list for --basket/--screen/"
+                         "--signals (defaults to the 20-name evaluation basket)")
     ap.add_argument("--start", default="2010-01-01")
     ap.add_argument("--sweep", action="store_true", help="walk-forward parameter sweep")
     ap.add_argument("--synthetic", action="store_true", help="run on synthetic data (no network)")
@@ -719,14 +740,13 @@ def main():
     if args.signals:
         p = stock_params() if args.stocks else Params()
         bench = load_yf("SPY", "2010-01-01")["Close"] if args.stocks else None
-        syms = [x.strip().upper() for x in args.symbol.split(",") if x.strip()]
-        scan_signals(syms, p, bench)
+        scan_signals(parse_symbols(args.symbol), p, bench)
         return
 
     if args.screen:
         p = stock_params() if args.stocks else Params()
         bench = load_yf("SPY", "2010-01-01")["Close"] if args.stocks else None
-        for s in [x.strip().upper() for x in args.symbol.split(",") if x.strip()]:
+        for s in parse_symbols(args.symbol):
             r = tradeability_screen(load_yf(s, args.start), p, bench)
             print(f"\n{s}: {r['verdict']}")
             print(f"  {r['bars_post_warmup']} bars post-warmup, {r['n_signals']} signals, "
@@ -737,7 +757,7 @@ def main():
         return
 
     if args.basket:
-        syms = [s.strip().upper() for s in args.symbol.split(",") if s.strip()]
+        syms = parse_symbols(args.symbol)
         p = stock_params() if args.stocks else Params()
         bench = load_yf("SPY", "2010-01-01")["Close"] if args.stocks else None
         datas = {s: load_yf(s, args.start) for s in syms}
@@ -767,8 +787,9 @@ def main():
         name = "SYNTHETIC (regime-switching GBM)"
     else:
         try:
-            df = load_yf(args.symbol, args.start)
-            name = args.symbol
+            symbol = args.symbol or "SPY"
+            df = load_yf(symbol, args.start)
+            name = symbol
         except Exception as e:
             print(f"Data download failed ({e}); falling back to synthetic data.", file=sys.stderr)
             df = synthetic_ohlc()

@@ -28,13 +28,11 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
 
-from backtest_qre import Params, stock_params, load_yf, run_backtest
+from backtest_qre import (Params, stock_params, load_yf, run_backtest,
+                          DEFAULT_BASKET, parse_symbols)
 
 FEATURES = ["er", "tstat", "adx", "vol_pctile", "z", "rsi_f", "rs_edge",
             "atr_pct", "dist_kama", "gap_atr", "side", "is_trend_engine"]
-
-DEFAULT_BASKET = ("AAPL,MSFT,NVDA,JPM,XOM,KO,TSLA,UNH,HD,CAT,"
-                  "WSM,DKS,TOL,CROX,ANF,TXRH,EME,GGG,WMS,SAIA")
 
 
 def collect_trades(symbols: list[str], p: Params, bench: pd.Series) -> pd.DataFrame:
@@ -110,8 +108,7 @@ def report(res: pd.DataFrame):
 
 
 def main():
-    syms = (sys.argv[1] if len(sys.argv) > 1 else DEFAULT_BASKET).split(",")
-    syms = [s.strip().upper() for s in syms if s.strip()]
+    syms = parse_symbols(sys.argv[1] if len(sys.argv) > 1 else None)
     p = stock_params()
     bench = load_yf("SPY", "2010-01-01")["Close"]
     print(f"Collecting trades from {len(syms)} names...")

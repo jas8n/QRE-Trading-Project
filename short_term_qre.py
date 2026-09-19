@@ -24,7 +24,8 @@ import numpy as np
 import pandas as pd
 
 from backtest_qre import (atr, rsi, load_yf, metrics, print_report,
-                          bootstrap_sharpe_ci, Trade)
+                          bootstrap_sharpe_ci, Trade, DEFAULT_BASKET,
+                          parse_symbols)
 
 
 @dataclass(frozen=True)
@@ -123,13 +124,9 @@ def st_portfolio(datas: dict[str, pd.DataFrame], p: STParams,
     return port
 
 
-DEFAULT_BASKET = ("AAPL,MSFT,NVDA,JPM,XOM,KO,TSLA,UNH,HD,CAT,"
-                  "WSM,DKS,TOL,CROX,ANF,TXRH,EME,GGG,WMS,SAIA")
-
 
 def main():
-    syms = (sys.argv[1] if len(sys.argv) > 1 else DEFAULT_BASKET).split(",")
-    syms = [s.strip().upper() for s in syms if s.strip()]
+    syms = parse_symbols(sys.argv[1] if len(sys.argv) > 1 else None)
     p = STParams()
     datas = {s: load_yf(s, "2012-01-01") for s in syms}
     all_tr, ms = [], []
